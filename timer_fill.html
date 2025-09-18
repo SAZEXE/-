@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>塗り進むタイマー（2160×1620対応）</title>
+<style>
+  :root { --gap: 10px; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Hiragino Kaku Gothic ProN", Meiryo, sans-serif; margin: 0; background: #111; color: #eee; }
+  header { padding: var(--gap); text-align: center; background:#1c1c1c; position: sticky; top:0; z-index:2; }
+  main { padding: var(--gap); }
+  .row { display: flex; flex-wrap: wrap; gap: var(--gap); align-items: center; justify-content: center; }
+  label { display: inline-flex; align-items: center; gap: 6px; }
+  input[type="number"] { width: 7em; }
+  select, input, button { font-size: 16px; padding: 6px 10px; border-radius: 8px; border: 1px solid #444; background:#222; color:#eee;}
+  button { cursor: pointer; }
+  button.primary { background:#3a8dff; border-color:#1f6fe0; }
+  button.warn { background:#f65; border-color:#d33; }
+  #canvasWrap { position: relative; width: 100%; max-width: min(92vw, 92vh * (2160/1620)); margin: 16px auto; }
+  canvas { width: 100%; height: auto; display: block; background:#000; border-radius: 10px; box-shadow: 0 0 0 1px #333, 0 8px 24px rgba(0,0,0,.5); }
+  #overlay { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none; font-weight:700; text-shadow: 0 2px 6px rgba(0,0,0,.6); }
+  #stats { text-align:center; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .hint { opacity:.8; font-size: 12px; }
+  .hr { height:1px; background:#333; margin: 10px 0; }
+</style>
+</head>
+<body>
+<header>
+  <div class="row">
+    <label>幅(px): <input id="w" type="number" value="2160" min="1"></label>
+    <label>高さ(px): <input id="h" type="number" value="1620" min="1"></label>
+    <label>合計時間: 
+      <input id="hours" type="number" value="0" min="0" step="1">時間
+      <input id="minutes" type="number" value="50" min="0" step="1">分
+      <input id="seconds" type="number" value="0" min="0" step="1">秒
+    </label>
+    <label>方向:
+      <select id="direction">
+        <option value="lr">左→右</option>
+        <option value="rl">右→左</option>
+        <option value="tb">上→下</option>
+        <option value="bt">下→上</option>
+      </select>
+    </label>
+    <label>塗り色: <input id="paintColor" type="color" value="#42b883"></label>
+    <label>背景色: <input id="bgColor" type="color" value="#111111"></label>
+    <label>背景画像: <input id="bgImg" type="file" accept="image/*"></label>
+  </div>
+  <div class="row">
+    <button id="start" class="primary">▶ 開始</button>
+    <button id="pause">⏸ 一時停止</button>
+    <button id="reset" class="warn">⟲ リセット</button>
+  </div>
+  <div id="stats">
+    <div><b>進行率:</b> <span id="pct">0.00%</span> / <b>処理済みピクセル:</b> <span id="pixels">0</span></div>
+    <div><b>経過:</b> <span id="elapsed">00:00:00</span> / <b>残り:</b> <span id="remain">00:00:00</span></div>
+    <div class="hint">※ requestAnimationFrame により実測経過時間で線形に塗り進みます（FPS設定は不要）。</div>
+  </div>
+</header>
+
+<main>
+  <div id="canvasWrap">
+    <canvas id="c" width="2160" height="1620"></canvas>
+    <div id="overlay"></div>
+  </div>
+  <div class="hr"></div>
+  <p style="text-align:center" class="hint">
+    例：50分なら 2160×1620 の合計 3,499,200 ピクセルを 3,000秒で線形に塗り進めます。<br>
+    8:00～16:30（8時間30分=30,600秒）の場合は 1秒あたり約114.3ピクセル進行、60FPSなら1Fあたり約1.9ピクセルに相当。
+  </p>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const c = $("c");
+  const ctx = c.getContext("2d");
+  const overlay = $("overlay");
+
+  const wEl = $("w"), hEl = $("h");
+  const hHour = $("hours"), hMin = $("minutes"), hSec = $("seconds");
+  const dirEl = $("direction");
+  const paintColorEl = $("paintColor");
+  const bgColorEl = $("bgColor");
+  const bgImgEl = $("bgImg");
+  const startBtn = $("start"), pauseBtn = $("pause"), resetBtn = $("reset");
+
+  const pctEl = $("pct"), pixEl = $("pixels"), elapEl = $("elapsed"), remEl = $("remain");
+
+  let running = false;
+  let startTimeMs = 0;
+  let pausedAtMs = 0;
+  let accumulatedPauseMs = 0;
+  let totalMs = 50 * 60 * 1000; // default 50 minutes
+  let bgImg = null;
+
+  function fmtTime(ms) {
+    ms = Math.max(0, Math.floor(ms));
+    const s = Math.floor(ms / 1000);
+    const hh = String(Math.floor(s/3600)).padStart(2,"0");
+    const mm = String(Math.floor((s%3600)/60)).padStart(2,"0");
+    const ss = String(s%60).padStart(2,"0");
+    return `${hh}:${mm}:${ss}`;
+  }
+
+  function computeTotalMs() {
+    const H = Number(hHour.value||0);
+    const M = Number(hMin.value||0);
+    const S = Number(hSec.value||0);
+    const ms = ((H*3600)+(M*60)+S) * 1000;
+    return Math.max(1, ms);
+  }
+
+  function redraw(progress) {
+    const W = Number(wEl.value||2160);
+    const H = Number(hEl.value||1620);
+    if (c.width !== W || c.height !== H) {
+      c.width = W; c.height = H;
+    }
+
+    // 背景（色 or 画像）
+    if (bgImg) {
+      // 画像はキャンバスにピッタリ収まるようにカバー表示
+      const cw = c.width, ch = c.height;
+      const ir = bgImg.width / bgImg.height;
+      const cr = cw / ch;
+      let dw, dh, dx, dy;
+      if (ir > cr) { // image wider
+        dh = ch; dw = dh * ir; dx = (cw - dw)/2; dy = 0;
+      } else {
+        dw = cw; dh = dw / ir; dx = 0; dy = (ch - dh)/2;
+      }
+      ctx.drawImage(bgImg, dx, dy, dw, dh);
+    } else {
+      ctx.fillStyle = bgColorEl.value;
+      ctx.fillRect(0,0,c.width,c.height);
+    }
+
+    // 塗り（progress は 0..1）
+    const dir = dirEl.value;
+    ctx.fillStyle = paintColorEl.value;
+    if (dir === "lr") {
+      const w = Math.floor(c.width * progress);
+      ctx.fillRect(0, 0, w, c.height);
+    } else if (dir === "rl") {
+      const w = Math.floor(c.width * progress);
+      ctx.fillRect(c.width - w, 0, w, c.height);
+    } else if (dir === "tb") {
+      const h = Math.floor(c.height * progress);
+      ctx.fillRect(0, 0, c.width, h);
+    } else if (dir === "bt") {
+      const h = Math.floor(c.height * progress);
+      ctx.fillRect(0, c.height - h, c.width, h);
+    }
+
+    // オーバーレイ（中央の%表示）
+    overlay.textContent = `${(progress*100).toFixed(2)}%`;
+  }
+
+  function updateStats(progress, elapsedMs) {
+    const W = Number(wEl.value||2160);
+    const H = Number(hEl.value||1620);
+    const totalPix = W * H;
+    const donePix = Math.floor(totalPix * progress);
+    pctEl.textContent = (progress*100).toFixed(2) + "%";
+    pixEl.textContent = donePix.toLocaleString();
+    elapEl.textContent = fmtTime(elapsedMs);
+    const remainMs = Math.max(0, totalMs - elapsedMs);
+    remEl.textContent = fmtTime(remainMs);
+  }
+
+  function step(ts) {
+    if (!running) return;
+    if (!startTimeMs) {
+      startTimeMs = ts;
+    }
+    const elapsedMs = ts - startTimeMs - accumulatedPauseMs;
+    const p = Math.min(1, elapsedMs / totalMs);
+    redraw(p);
+    updateStats(p, elapsedMs);
+    if (p >= 1) {
+      running = false;
+      return;
+    }
+    requestAnimationFrame(step);
+  }
+
+  startBtn.addEventListener("click", () => {
+    totalMs = computeTotalMs();
+    if (!running) {
+      if (pausedAtMs) {
+        // 再開
+        accumulatedPauseMs += performance.now() - pausedAtMs;
+        pausedAtMs = 0;
+      } else {
+        // 新規開始
+        startTimeMs = 0;
+        accumulatedPauseMs = 0;
+      }
+      running = true;
+      requestAnimationFrame(step);
+    }
+  });
+
+  pauseBtn.addEventListener("click", () => {
+    if (running) {
+      running = false;
+      pausedAtMs = performance.now();
+    }
+  });
+
+  resetBtn.addEventListener("click", () => {
+    running = false;
+    startTimeMs = 0;
+    pausedAtMs = 0;
+    accumulatedPauseMs = 0;
+    totalMs = computeTotalMs();
+    redraw(0);
+    updateStats(0, 0);
+  });
+
+  bgImgEl.addEventListener("change", (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) { bgImg = null; redraw(0); return; }
+    const img = new Image();
+    img.onload = () => { bgImg = img; redraw(0); };
+    img.src = URL.createObjectURL(file);
+  });
+
+  // 初期描画
+  totalMs = computeTotalMs();
+  redraw(0);
+  updateStats(0, 0);
+
+  // ウィンドウサイズに合わせてキャンバス親要素の最大幅をCSSで調整（比率はCSSで管理済み）
+  // ここでは特にJS不要
+})();
+</script>
+</body>
+</html>
