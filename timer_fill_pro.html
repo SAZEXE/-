@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>塗り進むタイマー PRO（複数モード＋ステップ）</title>
+<style>
+  :root { --gap: 10px; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Hiragino Kaku Gothic ProN", Meiryo, sans-serif; margin: 0; background: #111; color: #eee; }
+  header { padding: var(--gap); text-align: center; background:#1c1c1c; position: sticky; top:0; z-index:2; }
+  main { padding: var(--gap); }
+  .row { display: flex; flex-wrap: wrap; gap: var(--gap); align-items: center; justify-content: center; }
+  label { display: inline-flex; align-items: center; gap: 6px; }
+  input[type="number"], input[type="text"] { width: 8em; }
+  select, input, button { font-size: 16px; padding: 6px 10px; border-radius: 8px; border: 1px solid #444; background:#222; color:#eee;}
+  button { cursor: pointer; }
+  button.primary { background:#3a8dff; border-color:#1f6fe0; }
+  button.warn { background:#f65; border-color:#d33; }
+  #canvasWrap { position: relative; width: 100%; max-width: min(92vw, 92vh * (2160/1620)); margin: 16px auto; }
+  canvas { width: 100%; height: auto; display: block; background:#000; border-radius: 10px; box-shadow: 0 0 0 1px #333, 0 8px 24px rgba(0,0,0,.5); }
+  #overlay { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none; font-weight:700; text-shadow: 0 2px 6px rgba(0,0,0,.6); }
+  #stats { text-align:center; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .hint { opacity:.8; font-size: 12px; }
+  .hr { height:1px; background:#333; margin: 10px 0; }
+  .chip { font-size: 12px; opacity:.9; background:#222; border:1px solid #333; padding:2px 6px; border-radius:999px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="row">
+    <label>幅(px): <input id="w" type="number" value="2160" min="1"></label>
+    <label>高さ(px): <input id="h" type="number" value="1620" min="1"></label>
+    <label>合計時間: 
+      <input id="hours" type="number" value="0" min="0" step="1">時間
+      <input id="minutes" type="number" value="50" min="0" step="1">分
+      <input id="seconds" type="number" value="0" min="0" step="1">秒
+    </label>
+  </div>
+  <div class="row">
+    <label>塗り方式:
+      <select id="mode">
+        <option value="fill" selected>面塗り（矩形）</option>
+        <optgroup label="走査線（Scanline）">
+          <option value="scan_tb_lr">上→下・左→右</option>
+          <option value="scan_tb_rl">上→下・右→左</option>
+          <option value="scan_bt_lr">下→上・左→右</option>
+          <option value="scan_bt_rl">下→上・右→左</option>
+        </optgroup>
+        <optgroup label="ジグザグ（Boustrophedon）">
+          <option value="zigzag_tb">上→下（偶数行L→R／奇数行R→L）</option>
+          <option value="zigzag_bt">下→上（偶数行L→R／奇数行R→L）</option>
+        </optgroup>
+        <option value="random">ランダム（種あり）</option>
+      </select>
+    </label>
+    <label>ステップ（Nピクセルごと）: <input id="step" type="number" value="1" min="1" step="1"></label>
+    <label>ランダム種(seed): <input id="seed" type="text" value="12345"></label>
+    <span class="chip">※ステップ/種は 走査線・ジグザグ・ランダムに適用</span>
+  </div>
+  <div class="row">
+    <label>塗り色: <input id="paintColor" type="color" value="#42b883"></label>
+    <label>背景色: <input id="bgColor" type="color" value="#111111"></label>
+    <label>背景画像: <input id="bgImg" type="file" accept="image/*"></label>
+  </div>
+  <div class="row">
+    <button id="start" class="primary">▶ 開始</button>
+    <button id="pause">⏸ 一時停止</button>
+    <button id="reset" class="warn">⟲ リセット</button>
+  </div>
+  <div id="stats">
+    <div><b>進行率:</b> <span id="pct">0.00%</span> / <b>処理済みピクセル:</b> <span id="pixels">0</span></div>
+    <div><b>経過:</b> <span id="elapsed">00:00:00</span> / <b>残り:</b> <span id="remain">00:00:00</span></div>
+    <div class="hint">※ requestAnimationFrame により実測経過時間で線形に進みます。走査線/ジグザグ/ランダムは合計ピクセル数に対する進捗を <span class="chip">Nピクセル刻み</span>で反映します。</div>
+  </div>
+</header>
+
+<main>
+  <div id="canvasWrap">
+    <canvas id="c" width="2160" height="1620"></canvas>
+    <div id="overlay"></div>
+  </div>
+  <div class="hr"></div>
+  <p style="text-align:center" class="hint">
+    例：2160×1620 → 合計 3,499,200 ピクセル。<br>
+    「ランダム」は seed で順序を固定できます。ステップ=N にすると <code>⌊(総ピクセル×進捗)/N⌋×N</code> までを描画します。
+  </p>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const c = $("c");
+  const ctx = c.getContext("2d");
+  const overlay = $("overlay");
+
+  const wEl = $("w"), hEl = $("h");
+  const hHour = $("hours"), hMin = $("minutes"), hSec = $("seconds");
+  const modeEl = $("mode");
+  const stepEl = $("step");
+  const seedEl = $("seed");
+  const paintColorEl = $("paintColor");
+  const bgColorEl = $("bgColor");
+  const bgImgEl = $("bgImg");
+  const startBtn = $("start"), pauseBtn = $("pause"), resetBtn = $("reset");
+
+  const pctEl = $("pct"), pixEl = $("pixels"), elapEl = $("elapsed"), remEl = $("remain");
+
+  let running = false;
+  let startTimeMs = 0;
+  let pausedAtMs = 0;
+  let accumulatedPauseMs = 0;
+  let totalMs = 50 * 60 * 1000; // default 50 minutes
+  let bgImg = null;
+
+  // レイヤ（増分描画用）
+  let layer = document.createElement("canvas");
+  let lctx = layer.getContext("2d", { willReadFrequently: false });
+  let paintedCount = 0; // これまでに描いたピクセル数（整列/ランダム共通）
+
+  // ランダム順序用
+  let order = null; // Uint32Array or Array of indices
+  let orderSeedCache = null;
+  let orderWHCache = { w: 0, h: 0 };
+
+  function fmtTime(ms) {
+    ms = Math.max(0, Math.floor(ms));
+    const s = Math.floor(ms / 1000);
+    const hh = String(Math.floor(s/3600)).padStart(2,"0");
+    const mm = String(Math.floor((s%3600)/60)).padStart(2,"0");
+    const ss = String(s%60).padStart(2,"0");
+    return `${hh}:${mm}:${ss}`;
+  }
+
+  function computeTotalMs() {
+    const H = Number(hHour.value||0);
+    const M = Number(hMin.value||0);
+    const S = Number(hSec.value||0);
+    const ms = ((H*3600)+(M*60)+S) * 1000;
+    return Math.max(1, ms);
+  }
+
+  function ensureSize() {
+    const W = Number(wEl.value||2160);
+    const H = Number(hEl.value||1620);
+    if (c.width !== W || c.height !== H) {
+      c.width = W; c.height = H;
+    }
+    if (layer.width !== W || layer.height !== H) {
+      layer.width = W; layer.height = H;
+      lctx.clearRect(0,0,layer.width, layer.height);
+      paintedCount = 0;
+      order = null; // invalidate random order
+    }
+  }
+
+  function drawBackground() {
+    if (bgImg) {
+      const cw = c.width, ch = c.height;
+      const ir = bgImg.width / bgImg.height;
+      const cr = cw / ch;
+      let dw, dh, dx, dy;
+      if (ir > cr) { // image wider
+        dh = ch; dw = dh * ir; dx = (cw - dw)/2; dy = 0;
+      } else {
+        dw = cw; dh = dw / ir; dx = 0; dy = (ch - dh)/2;
+      }
+      ctx.drawImage(bgImg, dx, dy, dw, dh);
+    } else {
+      ctx.fillStyle = bgColorEl.value;
+      ctx.fillRect(0,0,c.width,c.height);
+    }
+  }
+
+  // ---- インデックス→(x,y) 変換 ----
+  function idxToXY(mode, idx, W, H) {
+    const row = Math.floor(idx / W);
+    const col = idx % W;
+    switch (mode) {
+      case "scan_tb_lr": return { x: col, y: row };
+      case "scan_tb_rl": return { x: (W-1-col), y: row };
+      case "scan_bt_lr": return { x: col, y: (H-1-row) };
+      case "scan_bt_rl": return { x: (W-1-col), y: (H-1-row) };
+      case "zigzag_tb": {
+        const y = row;
+        const x = (y % 2 === 0) ? col : (W-1-col);
+        return { x, y };
+      }
+      case "zigzag_bt": {
+        const yFromBottom = row;
+        const y = (H-1 - yFromBottom);
+        const x = (yFromBottom % 2 === 0) ? col : (W-1-col);
+        return { x, y };
+      }
+      default: return { x: col, y: row };
+    }
+  }
+
+  // ---- ランダム順序の生成（seeded Fisher-Yates） ----
+  function xorshift32(seed) {
+    // seed: uint32
+    let x = seed >>> 0;
+    return function() {
+      x ^= x << 13; x >>>= 0;
+      x ^= x >>> 17; x >>>= 0;
+      x ^= x << 5;  x >>>= 0;
+      return x >>> 0;
+    }
+  }
+  function strToSeed(str) {
+    // simple hash to uint32
+    let h = 2166136261 >>> 0;
+    for (let i=0; i<str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    return h >>> 0;
+  }
+  function ensureRandomOrder(W, H) {
+    const total = W*H;
+    const seedStr = String(seedEl.value||"0");
+    const seed = strToSeed(seedStr);
+    if (order && order.length === total && orderSeedCache === seed && orderWHCache.w===W && orderWHCache.h===H) return;
+    // create sequential indices
+    order = new Uint32Array(total);
+    for (let i=0;i<total;i++) order[i] = i;
+    const rnd = xorshift32(seed);
+    // Fisher-Yates
+    for (let i=total-1;i>0;i--) {
+      const r = rnd() / 4294967296; // 0..1
+      const j = (r * (i+1)) | 0;
+      const tmp = order[i];
+      order[i] = order[j];
+      order[j] = tmp;
+    }
+    orderSeedCache = seed;
+    orderWHCache = { w: W, h: H };
+  }
+
+  // ---- 描画（増分） ----
+  function paintScanLikeIncrement(mode, from, to) {
+    // 走査線/ジグザグ: 行の連続スパンをまとめて塗る
+    const W = layer.width, H = layer.height;
+    lctx.fillStyle = paintColorEl.value;
+    while (from < to) {
+      const row = Math.floor(from / W);
+      const col = from % W;
+      let spanEndIndex;
+      if (mode === "scan_tb_lr" || mode === "scan_bt_lr") {
+        // 左→右: その行の右端まで
+        spanEndIndex = Math.min((row * W) + (W-1), to - 1);
+        const spanLen = spanEndIndex - from + 1;
+        const p = idxToXY(mode, from, W, H);
+        lctx.fillRect(p.x, p.y, spanLen, 1);
+        from += spanLen;
+      } else if (mode === "scan_tb_rl" || mode === "scan_bt_rl") {
+        // 右→左: 現在位置から左端までをまとめるのが難しいので1列ごとに計算
+        // from の位置の x が右端に近いほど短くなる。ここでは同様に行末までのspanを使う。
+        // 右→左でも行インデックスは同じなので、spanLen は同じ計算でOK、描画の起点だけ idxToXY で求める。
+        spanEndIndex = Math.min((row * W) + (W-1), to - 1);
+        const spanLen = spanEndIndex - from + 1;
+        const p = idxToXY(mode, from, W, H);
+        // 右→左の場合でも fillRect は左→右幅で描けるよう、起点xを調整済み（idxToXYで右側xを返す）
+        lctx.fillRect(p.x, p.y, spanLen, 1);
+        from += spanLen;
+      } else if (mode === "zigzag_tb" || mode === "zigzag_bt") {
+        // ジグザグ: 行方向は同じだが、奇数行は右→左なので、spanは1列ずつではなく行の残りをまとめて描く
+        spanEndIndex = Math.min((row * W) + (W-1), to - 1);
+        const spanLen = spanEndIndex - from + 1;
+        // 起点の (x,y) を求め、幅 spanLen を1px 高さで塗る
+        const p = idxToXY(mode, from, W, H);
+        lctx.fillRect(Math.min(p.x, p.x + (spanLen-1)), p.y, spanLen, 1);
+        from += spanLen;
+      } else {
+        // フォールバック（安全策）
+        const p = idxToXY(mode, from, W, H);
+        lctx.fillRect(p.x, p.y, 1, 1);
+        from++;
+      }
+    }
+    return to;
+  }
+
+  function paintRandomIncrement(from, to) {
+    const W = layer.width, H = layer.height;
+    ensureRandomOrder(W, H);
+    lctx.fillStyle = paintColorEl.value;
+
+    // パスにまとめて矩形を追加し、一括塗りで負荷を下げる
+    lctx.beginPath();
+    const maxBatch = 20000; // 大量に進んだ時に1フレームで描きすぎないための安全弁
+    let painted = 0;
+    while (from < to && painted < maxBatch) {
+      const idx = order[from];
+      const y = Math.floor(idx / W);
+      const x = idx % W;
+      lctx.rect(x + 0.0, y + 0.0, 1, 1);
+      from++;
+      painted++;
+    }
+    lctx.fill();
+
+    return paintedCount + painted; // 実際に塗れた分だけ進める
+  }
+
+  function redrawProgress(progress) {
+    drawBackground();
+
+    const W = layer.width, H = layer.height;
+    const totalPix = W * H;
+    const step = Math.max(1, Math.floor(Number(stepEl.value)||1));
+    // 目標ピクセル数（ステップで丸め）
+    let targetCount = Math.floor(totalPix * progress);
+    targetCount = targetCount - (targetCount % step);
+    targetCount = Math.min(targetCount, totalPix);
+
+    if (targetCount < paintedCount) {
+      // 戻ったらクリアしてやり直し
+      lctx.clearRect(0,0,W,H);
+      paintedCount = 0;
+    }
+
+    if (targetCount > paintedCount) {
+      const mode = modeEl.value;
+      if (mode === "fill") {
+        // 面塗りは layer を使わず直接矩形
+        const p = targetCount / totalPix;
+        // 背景は既に描いているので、上から矩形を重ねる
+        ctx.fillStyle = paintColorEl.value;
+        // fill は速度面で矩形ベース（方向は任意だが、視覚上は左→右・上→下系でOK）
+        // 方向はひとまず左→右（幅）優先、縦は全域
+        const w = Math.floor(c.width * p);
+        ctx.fillRect(0, 0, w, c.height);
+        paintedCount = targetCount; // カウントのみ合わせる
+        return;
+      }
+
+      if (mode === "random") {
+        paintedCount = paintRandomIncrement(paintedCount, targetCount);
+      } else {
+        paintedCount = paintScanLikeIncrement(mode, paintedCount, targetCount);
+      }
+    }
+
+    // 合成（面塗り以外）
+    if (modeEl.value !== "fill") {
+      ctx.drawImage(layer, 0, 0);
+    }
+  }
+
+  function updateOverlayAndStats(progress, elapsedMs) {
+    const totalPix = c.width * c.height;
+    const donePix = Math.floor(totalPix * progress);
+    overlay.textContent = `${(progress*100).toFixed(2)}%`;
+    pctEl.textContent = (progress*100).toFixed(2) + "%";
+    pixEl.textContent = donePix.toLocaleString();
+    elapEl.textContent = fmtTime(elapsedMs);
+    const remainMs = Math.max(0, totalMs - elapsedMs);
+    remEl.textContent = fmtTime(remainMs);
+  }
+
+  function stepRAF(ts) {
+    if (!running) return;
+    if (!startTimeMs) {
+      startTimeMs = ts;
+    }
+    const elapsedMs = ts - startTimeMs - accumulatedPauseMs;
+    const p = Math.min(1, elapsedMs / totalMs);
+    redrawProgress(p);
+    updateOverlayAndStats(p, elapsedMs);
+    if (p >= 1) {
+      running = false;
+      return;
+    }
+    requestAnimationFrame(stepRAF);
+  }
+
+  function resetAll() {
+    running = false;
+    startTimeMs = 0;
+    pausedAtMs = 0;
+    accumulatedPauseMs = 0;
+    totalMs = computeTotalMs();
+    ensureSize();
+    // レイヤと統計をリセット
+    lctx.clearRect(0,0,layer.width, layer.height);
+    paintedCount = 0;
+    order = null;
+    redrawProgress(0);
+    updateOverlayAndStats(0, 0);
+  }
+
+  startBtn.addEventListener("click", () => {
+    totalMs = computeTotalMs();
+    if (!running) {
+      if (pausedAtMs) {
+        accumulatedPauseMs += performance.now() - pausedAtMs;
+        pausedAtMs = 0;
+      } else {
+        startTimeMs = 0;
+        accumulatedPauseMs = 0;
+      }
+      running = true;
+      requestAnimationFrame(stepRAF);
+    }
+  });
+  pauseBtn.addEventListener("click", () => {
+    if (running) {
+      running = false;
+      pausedAtMs = performance.now();
+    }
+  });
+  resetBtn.addEventListener("click", resetAll);
+  bgImgEl.addEventListener("change", (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) { bgImg = null; redrawProgress(0); return; }
+    const img = new Image();
+    img.onload = () => { bgImg = img; redrawProgress(0); };
+    img.src = URL.createObjectURL(file);
+  });
+
+  // サイズや重要設定が変わったらリセット（安全）
+  [wEl, hEl, modeEl, stepEl, seedEl, paintColorEl, bgColorEl].forEach(el => {
+    el.addEventListener("change", () => {
+      resetAll();
+    });
+  });
+
+  // 初期化
+  totalMs = computeTotalMs();
+  ensureSize();
+  redrawProgress(0);
+  updateOverlayAndStats(0, 0);
+})();
+</script>
+</body>
+</html>
