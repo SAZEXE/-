@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>角が削れて菱形→45°回転→直方体に戻るアニメ</title>
+<style>
+  :root{
+    --bg:#0b1020;
+    --top:#7aa7ff;
+    --side1:#5c83d6;
+    --side2:#425fa6;
+    --edge:#1c2440;
+    --floor:#0e1530;
+  }
+  html,body{height:100%;margin:0;background:var(--bg);color:#eaf1ff;font-family:system-ui, -apple-system, "Segoe UI", Roboto;}
+  header{position:fixed;left:0;right:0;top:0;padding:10px 16px;background:linear-gradient(180deg, rgba(0,0,0,.45), rgba(0,0,0,0));pointer-events:none}
+  .wrap{display:grid;place-items:center;height:100%;}
+  svg{width:min(92vw,720px);height:min(92vh,520px);overflow:visible}
+  .hint{position:fixed;bottom:10px;left:0;right:0;display:flex;justify-content:center;gap:16px;opacity:.85}
+  .panel{background:#101938;border:1px solid #1b2855;border-radius:10px;padding:8px 12px}
+  a, a:visited{color:#9dc1ff}
+  .soft-shadow{filter:drop-shadow(0 12px 16px rgba(0,0,0,.35)) drop-shadow(0 2px 6px rgba(0,0,0,.25));}
+  .floor{opacity:.22}
+</style>
+</head>
+<body>
+<header>
+  <strong>角が削れていく角柱 → 菱形っぽく → 45°回転 → 元の直方体に戻る</strong>
+</header>
+
+<div class="wrap">
+  <svg id="stage" viewBox="-400 -320 800 640" aria-label="isometric chamfered prism animation">
+    <!-- 床の楕円（奥行きの目安） -->
+    <ellipse class="floor" cx="0" cy="120" rx="250" ry="70" fill="url(#floorGrad)"></ellipse>
+
+    <!-- 偽3D: 上面 + 2つの側面（見える面のみ）-->
+    <g id="prism" class="soft-shadow">
+      <polygon id="sideB" fill="var(--side2)" stroke="var(--edge)" stroke-width="2" />
+      <polygon id="sideA" fill="var(--side1)" stroke="var(--edge)" stroke-width="2" />
+      <polygon id="top"   fill="var(--top)"   stroke="var(--edge)" stroke-width="2" />
+      <!-- エッジのハイライト（上面の外周） -->
+      <polyline id="topEdge" fill="none" stroke="rgba(255,255,255,.35)" stroke-width="1.3" />
+    </g>
+
+    <defs>
+      <radialGradient id="floorGrad">
+        <stop offset="0" stop-color="var(--floor)" stop-opacity="1"/>
+        <stop offset="1" stop-color="var(--floor)" stop-opacity="0"/>
+      </radialGradient>
+    </defs>
+  </svg>
+</div>
+
+<div class="hint">
+  <div class="panel">再生：自動／ループ（クリック不要）</div>
+  <div class="panel">速度調整はコード内 <code>speed</code> を変更</div>
+</div>
+
+<script>
+const cfg = {
+  // 断面サイズ（長方形が基準）: X(横)×Y(奥) に高さZ
+  size: { X: 180, Y: 120, Z: 120 },
+  // 面ごとの濃淡（自動で乗算する簡易ライティング）
+  shade: { top: 1.00, sideA: 0.88, sideB: 0.76 },
+  // 角の削り最大量（菱形っぽくなる度合い。短辺の半分付近が素直）
+  chamferMaxRatio: 0.48, // 0〜0.5 推奨
+  // アニメーション速度（数値を大きくするとゆっくり）
+  speed: 1.0,
+};
+
+// アイソメ座標（x右+, y奥+, z上+）→ 2Dスクリーン
+const COS30 = Math.cos(Math.PI/6); // ≈0.866
+const SIN30 = Math.sin(Math.PI/6); // =0.5
+function project(x,y,z){
+  const X =  (x - y) * COS30;
+  const Y = (x + y) * SIN30 - z;
+  return [X, Y];
+}
+
+// 角を削った長方形（Octagon）ポリゴン（Z=上面）
+function chamferedRectPolygon(ax, ay, cham){
+  const c = Math.max(0, Math.min(cham, Math.min(ax, ay)));
+  return [
+    [ ax - c,  ay], [ ax,  ay - c],
+    [ ax, -ay + c], [ ax - c, -ay],
+    [-ax + c, -ay], [-ax, -ay + c],
+    [-ax,  ay - c], [-ax + c,  ay]
+  ];
+}
+
+// ダイヤ（菱形）ポリゴン
+function diamondPolygon(ax, ay){
+  return [
+    [0,  ay], [ ax, 0],
+    [0, -ay], [-ax, 0]
+  ];
+}
+
+// 頂点配列を別の頂点配列へ線形補間（対応数が異なる場合は周長サンプリング）
+function lerpPolys(polyA, polyB, t, samples=8){
+  const out = [];
+  for(let i=0;i<samples;i++){
+    const pa = samplePolygon(polyA, i/samples);
+    const pb = samplePolygon(polyB, i/samples);
+    out.push([ pa[0]*(1-t)+pb[0]*t, pa[1]*(1-t)+pb[1]*t ]);
+  }
+  return out;
+}
+
+function samplePolygon(poly, u){
+  const pts = poly.slice();
+  if(pts.length===0) return [0,0];
+  if(!(pts[0][0]===pts[pts.length-1][0] && pts[0][1]===pts[pts.length-1][1])){
+    pts.push(pts[0]);
+  }
+  let L=0;
+  const segs = [];
+  for(let i=0;i<pts.length-1;i++){
+    const dx=pts[i+1][0]-pts[i][0], dy=pts[i+1][1]-pts[i][1];
+    const l=Math.hypot(dx,dy); L+=l; segs.push({i,l});
+  }
+  let d = u*L;
+  for(const s of segs){
+    const a=pts[s.i], b=pts[s.i+1];
+    if(d<=s.l){
+      const r = (s.l===0)?0:(d/s.l);
+      return [ a[0]+(b[0]-a[0])*r, a[1]+(b[1]-a[1])*r ];
+    }
+    d-=s.l;
+  }
+  return pts[0];
+}
+
+function rotate2D([x,y], rad){
+  const c=Math.cos(rad), s=Math.sin(rad);
+  return [ x*c - y*s, x*s + y*c ];
+}
+
+const topPoly  = document.getElementById('top');
+const sideAPoly= document.getElementById('sideA');
+const sideBPoly= document.getElementById('sideB');
+const topEdge  = document.getElementById('topEdge');
+
+function shadeColor(hex, f){
+  const m = hex.match(/^#?([0-9a-f]{6})$/i);
+  if(!m) return hex;
+  const n = parseInt(m[1],16);
+  let r=(n>>16)&255, g=(n>>8)&255, b=n&255;
+  r = Math.round(r*f); g=Math.round(g*f); b=Math.round(b*f);
+  return `rgb(${r},${g},${b})`;
+}
+function getCssVar(name){
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+(function setFillShades(){
+  topPoly.style.fill   = shadeColor(getCssVar('--top'),  1.00);
+  sideAPoly.style.fill = shadeColor(getCssVar('--side1'),0.88);
+  sideBPoly.style.fill = shadeColor(getCssVar('--side2'),0.76);
+})();
+
+// フェーズ構成
+const phases = [
+  { dur: 1.2, kind: 'chamferUp'   },
+  { dur: 1.0, kind: 'morphRotate' },
+  { dur: 1.2, kind: 'chamferDown' },
+  { dur: 1.0, kind: 'rotateBack'  },
+];
+const totalDur = phases.reduce((s,p)=>s+p.dur,0);
+let t0 = performance.now();
+
+function easeInOutCubic(x){ return x<0.5 ? 4*x*x*x : 1 - Math.pow(-2*x+2,3)/2; }
+
+function animate(now){
+  const elapsed = (now - t0)/1000 * 1.0;
+  const mod = elapsed % totalDur;
+
+  const halfX = cfg.size.X/2;
+  const halfY = cfg.size.Y/2;
+  const H     = cfg.size.Z;
+
+  const maxCham = Math.min(halfX, halfY) * cfg.chamferMaxRatio * 2.1;
+  let cham = 0;
+  let morph = 0;
+  let deg = 0;
+
+  let t = mod;
+  for(const ph of phases){
+    if(t <= ph.dur){
+      const u = easeInOutCubic(t/ph.dur);
+      if(ph.kind === 'chamferUp'){      cham = maxCham * u;       morph = 0; deg = 0; }
+      else if(ph.kind === 'morphRotate'){ cham = maxCham;           morph = u; deg = 45 * u; }
+      else if(ph.kind === 'chamferDown'){ cham = maxCham * (1 - u); morph = 0; deg = 45;    }
+      else if(ph.kind === 'rotateBack'){  cham = 0;                 morph = 0; deg = 45*(1-u); }
+      break;
+    }else{
+      if(ph.kind === 'chamferUp'){ cham = maxCham; }
+      if(ph.kind === 'morphRotate'){ cham = maxCham; morph = 1; deg = 45; }
+      if(ph.kind === 'chamferDown'){ cham = 0; morph = 0; deg = 45; }
+      if(ph.kind === 'rotateBack'){ cham = 0; morph = 0; deg = 0; }
+      t -= ph.dur;
+    }
+  }
+
+  const base = chamferedRectPolygon(halfX, halfY, cham);
+  const dia  = diamondPolygon(halfX, halfY);
+  const face2D = lerpPolys(base, dia, morph, 8).map(p => rotate2D(p, deg*Math.PI/180));
+
+  const topPts = face2D.map(([x,y]) => project(x,y, 0));
+  const botPts = face2D.map(([x,y]) => project(x,y,-H));
+
+  const edges = [];
+  for(let i=0;i<face2D.length;i++){
+    const a = face2D[i];
+    const b = face2D[(i+1)%face2D.length];
+    const mid = [(a[0]+b[0])/2, (a[1]+b[1])/2];
+    edges.push({ i, mid });
+  }
+  edges.sort((e1,e2)=> (e2.mid[0]-e1.mid[0])); const rightEdge = edges[0];
+  edges.sort((e1,e2)=> (e2.mid[1]-e1.mid[1])); const backEdge  = edges[0];
+
+  const toStr = pts => pts.map(p=>`${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
+
+  topPoly.setAttribute('points', toStr(topPts));
+  topEdge.setAttribute('points', toStr(topPts.concat([topPts[0]])));
+
+  const iA = rightEdge.i;
+  const pA1 = topPts[iA],     pA2 = topPts[(iA+1)%topPts.length];
+  const pA3 = botPts[(iA+1)%botPts.length], pA4 = botPts[iA];
+  sideAPoly.setAttribute('points', toStr([pA1,pA2,pA3,pA4]));
+
+  const iB = backEdge.i;
+  const pB1 = topPts[iB],     pB2 = topPts[(iB+1)%topPts.length];
+  const pB3 = botPts[(iB+1)%botPts.length], pB4 = botPts[iB];
+  sideBPoly.setAttribute('points', toStr([pB1,pB2,pB3,pB4]));
+
+  requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>
