@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>塗り進むタイマー PRO（指定初期値プリセット）</title>
+<style>
+  :root { --gap: 10px; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Hiragino Kaku Gothic ProN", Meiryo, sans-serif; margin: 0; background: #111; color: #eee; }
+  header { padding: var(--gap); text-align: center; background:#1c1c1c; position: sticky; top:0; z-index:2; }
+  main { padding: var(--gap); }
+  .row { display: flex; flex-wrap: wrap; gap: var(--gap); align-items: center; justify-content: center; }
+  label { display: inline-flex; align-items: center; gap: 6px; }
+  input[type="number"], input[type="text"] { width: 8em; }
+  select, input, button { font-size: 16px; padding: 6px 10px; border-radius: 8px; border: 1px solid #444; background:#222; color:#eee;}
+  button { cursor: pointer; }
+  button.primary { background:#3a8dff; border-color:#1f6fe0; }
+  button.warn { background:#f65; border-color:#d33; }
+  #canvasWrap { position: relative; width: 100%; max-width: min(92vw, 92vh * (1920/1080)); margin: 16px auto; }
+  canvas { width: 100%; height: auto; display: block; background:#000; border-radius: 10px; box-shadow: 0 0 0 1px #333, 0 8px 24px rgba(0,0,0,.5); }
+  #overlay { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none; font-weight:700; text-shadow: 0 2px 6px rgba(0,0,0,.6); text-align:center; }
+  #overlay .box{ display:inline-block; padding:.35em .6em; line-height:1.2; border-radius:10px; background:rgba(0,0,0,.35); }
+  #overlay .pct { font-size: min(10vw, 56px); }
+  #overlay .remain { font-size: min(6.5vw, 28px); opacity:.95; }
+  #stats { text-align:center; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .hint { opacity:.8; font-size: 12px; }
+  .hr { height:1px; background:#333; margin: 10px 0; }
+  .chip { font-size: 12px; opacity:.9; background:#222; border:1px solid #333; padding:2px 6px; border-radius:999px; }
+  :fullscreen #c { border-radius: 0; box-shadow:none; }
+  :-webkit-full-screen #c { border-radius: 0; box-shadow:none; }
+</style>
+</head>
+<body>
+<header>
+  <div class="row">
+    <label>幅(px): <input id="w" type="number" value="1920" min="1"></label>
+    <label>高さ(px): <input id="h" type="number" value="1080" min="1"></label>
+    <label>合計時間: 
+      <input id="hours" type="number" value="0" min="0" step="1">時間
+      <input id="minutes" type="number" value="50" min="0" step="1">分
+      <input id="seconds" type="number" value="0" min="0" step="1">秒
+    </label>
+  </div>
+  <div class="row">
+    <label>塗り方式:
+      <select id="mode">
+        <option value="fill">面塗り（矩形）</option>
+        <optgroup label="走査線（Scanline）">
+          <option value="scan_tb_lr" selected>上→下・左→右</option>
+          <option value="scan_tb_rl">上→下・右→左</option>
+          <option value="scan_bt_lr">下→上・左→右</option>
+          <option value="scan_bt_rl">下→上・右→左</option>
+        </optgroup>
+        <optgroup label="ジグザグ（Boustrophedon）">
+          <option value="zigzag_tb">上→下（偶数行L→R／奇数行R→L）</option>
+          <option value="zigzag_bt">下→上（偶数行L→R／奇数行R→L）</option>
+        </optgroup>
+        <option value="random">ランダム（種あり）</option>
+      </select>
+    </label>
+    <label>ステップ（Nピクセルごと）: <input id="step" type="number" value="1" min="1" step="1"></label>
+    <label>ランダム種(seed): <input id="seed" type="text" value="12345"></label>
+    <span class="chip">※ステップ/種は 走査線・ジグザグ・ランダムに適用</span>
+  </div>
+  <div class="row">
+    <label>塗り色（単色）: <input id="paintColor" type="color" value="#1E0070"></label>
+    <label>背景色: <input id="bgColor" type="color" value="#111111"></label>
+    <label>背景画像: <input id="bgImg" type="file" accept="image/*"></label>
+  </div>
+  <div class="row">
+    <label>グラデ方向:
+      <select id="gradDir">
+        <option value="none">なし（単色）</option>
+        <option value="horizontal">横（左→右）</option>
+        <option value="vertical" selected>縦（上→下）</option>
+      </select>
+    </label>
+    <label>開始色: <input id="gradStart" type="color" value="#1E0070"></label>
+    <label>終了色: <input id="gradEnd" type="color" value="#00FF00"></label>
+  </div>
+  <div class="row">
+    <button id="start" class="primary">▶ 開始</button>
+    <button id="pause">⏸ 一時停止</button>
+    <button id="reset" class="warn">⟲ リセット</button>
+    <button id="fs">⛶ 全画面（塗りのみ）</button>
+  </div>
+  <div id="stats">
+    <div><b>進行率:</b> <span id="pct">0.00%</span> / <b>処理済みピクセル:</b> <span id="pixels">0</span></div>
+    <div><b>経過:</b> <span id="elapsed">00:00:00</span> / <b>残り:</b> <span id="remain">00:00:00</span></div>
+    <div class="hint">※ 中央にも <b>残り時間</b> を表示。全画面ボタンはキャンバス部分だけをフルスクリーン化します。グラデは横/縦の線形に対応。</div>
+  </div>
+</header>
+
+<main>
+  <div id="canvasWrap">
+    <canvas id="c" width="1920" height="1080"></canvas>
+    <div id="overlay"></div>
+  </div>
+  <div class="hr"></div>
+  <p style="text-align:center" class="hint">
+    例：1920×1080 → 合計 2,073,600 ピクセル。<br>
+    ステップ=N にすると <code>⌊(総ピクセル×進捗)/N⌋×N</code> までを描画します。
+  </p>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const c = $("c");
+  const ctx = c.getContext("2d");
+  const overlay = $("overlay");
+  const wrap = $("canvasWrap");
+
+  const wEl = $("w"), hEl = $("h");
+  const hHour = $("hours"), hMin = $("minutes"), hSec = $("seconds");
+  const modeEl = $("mode");
+  const stepEl = $("step");
+  const seedEl = $("seed");
+  const paintColorEl = $("paintColor");
+  const bgColorEl = $("bgColor");
+  const bgImgEl = $("bgImg");
+  const gradDirEl = $("gradDir");
+  const gradStartEl = $("gradStart");
+  const gradEndEl = $("gradEnd");
+  const startBtn = $("start"), pauseBtn = $("pause"), resetBtn = $("reset"), fsBtn = $("fs");
+
+  const pctEl = $("pct"), pixEl = $("pixels"), elapEl = $("elapsed"), remEl = $("remain");
+
+  let running = false;
+  let startTimeMs = 0;
+  let pausedAtMs = 0;
+  let accumulatedPauseMs = 0;
+  let totalMs = 50 * 60 * 1000; // 0:50:00
+  let bgImg = null;
+
+  // layer for incremental painting
+  let layer = document.createElement("canvas");
+  let lctx = layer.getContext("2d");
+  let paintedCount = 0;
+
+  // random order
+  let order = null;
+  let orderSeedCache = null;
+  let orderWHCache = { w: 0, h: 0 };
+
+  // ===== Utils =====
+  function fmtTime(ms) {
+    ms = Math.max(0, Math.floor(ms));
+    const s = Math.floor(ms / 1000);
+    const hh = String(Math.floor(s/3600)).padStart(2,"0");
+    const mm = String(Math.floor((s%3600)/60)).padStart(2,"0");
+    const ss = String(s%60).padStart(2,"0");
+    return {hh, mm, ss, text:`${hh}:${mm}:${ss}`};
+  }
+  function fmtMinSec(ms){
+    ms = Math.max(0, Math.floor(ms));
+    const s = Math.floor(ms/1000);
+    const mm = String(Math.floor(s/60)).padStart(2,"0");
+    const ss = String(s%60).padStart(2,"0");
+    return `${mm}:${ss}`;
+  }
+  function computeTotalMs() {
+    const H = Number(hHour.value||0);
+    const M = Number(hMin.value||50);
+    const S = Number(hSec.value||0);
+    const ms = ((H*3600)+(M*60)+S) * 1000;
+    return Math.max(1, ms);
+  }
+  function ensureSize() {
+    const W = Number(wEl.value||1920);
+    const H = Number(hEl.value||1080);
+    if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
+    if (layer.width !== W || layer.height !== H) {
+      layer.width = W; layer.height = H;
+      lctx.clearRect(0,0,layer.width, layer.height);
+      paintedCount = 0;
+      order = null;
+    }
+  }
+
+  function makePaintStyle(context, W, H) {
+    const dir = gradDirEl.value;
+    if (dir === "horizontal") {
+      const g = context.createLinearGradient(0, 0, W, 0);
+      g.addColorStop(0, gradStartEl.value);
+      g.addColorStop(1, gradEndEl.value);
+      return g;
+    } else if (dir === "vertical") {
+      const g = context.createLinearGradient(0, 0, 0, H);
+      g.addColorStop(0, gradStartEl.value);
+      g.addColorStop(1, gradEndEl.value);
+      return g;
+    } else {
+      return paintColorEl.value;
+    }
+  }
+
+  function drawBackground() {
+    if (bgImg) {
+      const cw = c.width, ch = c.height;
+      const ir = bgImg.width / bgImg.height;
+      const cr = cw / ch;
+      let dw, dh, dx, dy;
+      if (ir > cr) { dh = ch; dw = dh * ir; dx = (cw - dw)/2; dy = 0; }
+      else { dw = cw; dh = dw / ir; dx = 0; dy = (ch - dh)/2; }
+      ctx.drawImage(bgImg, dx, dy, dw, dh);
+    } else {
+      ctx.fillStyle = bgColorEl.value;
+      ctx.fillRect(0,0,c.width,c.height);
+    }
+  }
+
+  function idxToXY(mode, idx, W, H) {
+    const row = Math.floor(idx / W);
+    const col = idx % W;
+    switch (mode) {
+      case "scan_tb_lr": return { x: col, y: row };
+      case "scan_tb_rl": return { x: (W-1-col), y: row };
+      case "scan_bt_lr": return { x: col, y: (H-1-row) };
+      case "scan_bt_rl": return { x: (W-1-col), y: (H-1-row) };
+      case "zigzag_tb": {
+        const y = row;
+        const x = (y % 2 === 0) ? col : (W-1-col);
+        return { x, y };
+      }
+      case "zigzag_bt": {
+        const yFromBottom = row;
+        const y = (H-1 - yFromBottom);
+        const x = (yFromBottom % 2 === 0) ? col : (W-1-col);
+        return { x, y };
+      }
+      default: return { x: col, y: row };
+    }
+  }
+
+  function xorshift32(seed) { let x = seed>>>0; return function(){ x^=x<<13; x>>>=0; x^=x>>>17; x>>>=0; x^=x<<5; x>>>=0; return x>>>0; } }
+  function strToSeed(str) {
+    let h = 2166136261>>>0;
+    for (let i=0;i<str.length;i++){ h ^= str.charCodeAt(i); h = Math.imul(h,16777619)>>>0; }
+    return h>>>0;
+  }
+  function ensureRandomOrder(W, H) {
+    const total = W*H;
+    const seedStr = String(seedEl.value||"0");
+    const seed = strToSeed(seedStr);
+    if (order && order.length===total && orderSeedCache===seed && orderWHCache.w===W && orderWHCache.h===H) return;
+    order = new Uint32Array(total);
+    for (let i=0;i<total;i++) order[i] = i;
+    const rnd = xorshift32(seed);
+    for (let i=total-1;i>0;i--) { const r = rnd()/4294967296; const j = (r*(i+1))|0; const t=order[i]; order[i]=order[j]; order[j]=t; }
+    orderSeedCache = seed; orderWHCache = { w: W, h: H };
+  }
+
+  function paintScanLikeIncrement(mode, from, to) {
+    const W = layer.width, H = layer.height;
+    lctx.fillStyle = makePaintStyle(lctx, W, H);
+    while (from < to) {
+      const row = Math.floor(from / W);
+      const spanEndIndex = Math.min((row * W) + (W-1), to - 1);
+      const spanLen = spanEndIndex - from + 1;
+      const p = idxToXY(mode, from, W, H);
+      lctx.fillRect(Math.min(p.x, p.x + (spanLen-1)), p.y, spanLen, 1);
+      from += spanLen;
+    }
+    return to;
+  }
+  function paintRandomIncrement(from, to) {
+    const W = layer.width, H = layer.height;
+    ensureRandomOrder(W, H);
+    lctx.fillStyle = makePaintStyle(lctx, W, H);
+    lctx.beginPath();
+    const maxBatch = 20000;
+    let painted = 0;
+    while (from < to && painted < maxBatch) {
+      const idx = order[from];
+      const y = Math.floor(idx / W);
+      const x = idx % W;
+      lctx.rect(x, y, 1, 1);
+      from++; painted++;
+    }
+    lctx.fill();
+    return paintedCount + painted;
+  }
+
+  function redrawProgress(progress) {
+    drawBackground();
+    const W = layer.width, H = layer.height;
+    const totalPix = W * H;
+    const stepN = Math.max(1, Math.floor(Number(stepEl.value)||1));
+    let targetCount = Math.floor(totalPix * progress);
+    targetCount = targetCount - (targetCount % stepN);
+    targetCount = Math.min(targetCount, totalPix);
+
+    if (targetCount < paintedCount) { lctx.clearRect(0,0,W,H); paintedCount = 0; }
+
+    const mode = modeEl.value;
+    if (mode === "fill") {
+      const p = targetCount / totalPix;
+      ctx.fillStyle = makePaintStyle(ctx, c.width, c.height);
+      const w = Math.floor(c.width * p);
+      ctx.fillRect(0, 0, w, c.height);
+      paintedCount = targetCount;
+    } else {
+      if (targetCount > paintedCount) {
+        if (mode === "random") paintedCount = paintRandomIncrement(paintedCount, targetCount);
+        else paintedCount = paintScanLikeIncrement(mode, paintedCount, targetCount);
+      }
+      ctx.drawImage(layer, 0, 0);
+    }
+  }
+
+  function updateOverlayAndStats(progress, elapsedMs) {
+    const totalPix = c.width * c.height;
+    const donePix = Math.floor(totalPix * progress);
+    const remainMs = Math.max(0, totalMs - elapsedMs);
+    const tAll = fmtTime(elapsedMs);
+    const tRemain = fmtTime(remainMs);
+    overlay.innerHTML = `<div class="box"><div class="pct">${(progress*100).toFixed(2)}%</div><div class="remain">残り ${tRemain.mm}:${tRemain.ss}</div></div>`;
+    pctEl.textContent = (progress*100).toFixed(2) + "%";
+    pixEl.textContent = donePix.toLocaleString();
+    elapEl.textContent = tAll.text;
+    remEl.textContent = tRemain.text;
+  }
+
+  function stepRAF(ts) {
+    if (!running) return;
+    if (!startTimeMs) startTimeMs = ts;
+    const elapsedMs = ts - startTimeMs - accumulatedPauseMs;
+    const p = Math.min(1, elapsedMs / totalMs);
+    redrawProgress(p);
+    updateOverlayAndStats(p, elapsedMs);
+    if (p >= 1) { running = false; return; }
+    requestAnimationFrame(stepRAF);
+  }
+
+  function computeTotalMsAndEnsure() { totalMs = computeTotalMs(); ensureSize(); }
+  function resetAll() {
+    running = false; startTimeMs = 0; pausedAtMs = 0; accumulatedPauseMs = 0;
+    computeTotalMsAndEnsure();
+    lctx.clearRect(0,0,layer.width, layer.height);
+    paintedCount = 0; order = null;
+    redrawProgress(0); updateOverlayAndStats(0, 0);
+  }
+
+  // controls
+  $("start").addEventListener("click", () => {
+    computeTotalMsAndEnsure();
+    if (!running) {
+      if (pausedAtMs) { accumulatedPauseMs += performance.now() - pausedAtMs; pausedAtMs = 0; }
+      else { startTimeMs = 0; accumulatedPauseMs = 0; }
+      running = true; requestAnimationFrame(stepRAF);
+    }
+  });
+  $("pause").addEventListener("click", () => { if (running) { running = false; pausedAtMs = performance.now(); } });
+  $("reset").addEventListener("click", resetAll);
+
+  bgImgEl.addEventListener("change", (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) { bgImg = null; redrawProgress(0); return; }
+    const img = new Image();
+    img.onload = () => { bgImg = img; redrawProgress(0); };
+    img.src = URL.createObjectURL(file);
+  });
+
+  [wEl, hEl, modeEl, stepEl, seedEl, paintColorEl, bgColorEl, gradDirEl, gradStartEl, gradEndEl].forEach(el => {
+    el.addEventListener("change", resetAll);
+  });
+
+  // fullscreen
+  function toggleFullscreen() {
+    const el = wrap;
+    const isFs = document.fullscreenElement || document.webkitFullscreenElement;
+    if (!isFs) {
+      if (el.requestFullscreen) el.requestFullscreen();
+      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+      fsBtn.textContent = "⛶ 全画面解除";
+    } else {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+      fsBtn.textContent = "⛶ 全画面（塗りのみ）";
+    }
+  }
+  const fsBtn = $("fs");
+  fsBtn.addEventListener("click", toggleFullscreen);
+  document.addEventListener("fullscreenchange", () => {
+    fsBtn.textContent = document.fullscreenElement ? "⛶ 全画面解除" : "⛶ 全画面（塗りのみ）";
+  });
+  document.addEventListener("webkitfullscreenchange", () => {
+    const isFs = document.webkitFullscreenElement;
+    fsBtn.textContent = isFs ? "⛶ 全画面解除" : "⛶ 全画面（塗りのみ）";
+  });
+
+  // init
+  ensureSize();
+  redrawProgress(0);
+  updateOverlayAndStats(0, 0);
+})();
+</script>
+</body>
+</html>
