@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>timer_fill_pro v3.4</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --text:#e9eef4; --muted:#94a3b8;
+    --grid:#0f1220;
+  }
+  html,body{height:100%;}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font:16px/1.5 -apple-system,system-ui,Segoe UI,Roboto,Helvetica,Arial,"Hiragino Sans","Noto Sans JP",sans-serif;
+    display:grid; grid-template-rows:1fr auto; gap:10px;
+  }
+  header{
+    display:flex; align-items:center; justify-content:center; gap:10px;
+    padding:12px 14px; background:var(--panel); box-shadow:0 1px 0 rgba(255,255,255,.04) inset;
+  }
+  header h1{font-size:16px; margin:0; font-weight:600; opacity:.9;}
+  main{display:grid; place-items:center; padding:0; margin:0;}
+  canvas{width:100vw; height:100vh; touch-action:none; background:var(--grid); display:block;}
+  .hud{
+    position:fixed; left:50%; bottom:14px; transform:translateX(-50%);
+    background:var(--panel); border:1px solid #222834; border-radius:12px;
+    padding:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+    box-shadow:0 8px 24px rgba(0,0,0,.35);
+  }
+  .hud input[type="number"]{width:6.2em;}
+  .hud input,.hud button,.hud select,.hud label{ font:inherit; color:var(--text); }
+  .hud input[type="number"], .hud input[type="color"], .hud select, .hud button{
+    background:#1d2230; border:1px solid #2b3140; border-radius:10px;
+    padding:8px 10px; outline:none;
+  }
+  .hud button{cursor:pointer;}
+  .hud button.primary{background:linear-gradient(135deg,#4da3ff,#ffd43b); border:none; font-weight:700;}
+  .hud button.ghost{background:transparent; border-color:#2b3140; color:var(--muted);}
+  .row{display:flex; gap:8px; align-items:center; flex-wrap:wrap;}
+  .small{font-size:.85em; color:var(--muted);}
+  .ok{font-weight:700;}
+  label.small{user-select:none;}
+  :fullscreen .hide-in-fs{ display:none !important; }
+  :fullscreen .hud{ display:none !important; }
+  .group{padding:6px 8px; border:1px solid #2b3140; border-radius:10px; background:#151a26;}
+  .note{opacity:.7;}
+</style>
+</head>
+<body>
+  <header class="hide-in-fs">
+    <h1>timer_fill_pro v3.4</h1>
+    <span class="small">スキャンライン / 全画面塗り切り / 時刻ベース（スリープ復帰）</span>
+  </header>
+
+  <main>
+    <canvas id="cv" aria-label="タイマー表示（スキャンライン）"></canvas>
+  </main>
+
+  <div class="hud" role="group" aria-label="操作">
+    <div class="row group">
+      <span class="small">① 時間指定：</span>
+      <input id="dh" type="number" min="0" step="1" value="0" aria-label="時間" />時間
+      <input id="dm" type="number" min="0" step="1" value="50" aria-label="分" />分
+      <input id="ds" type="number" min="0" step="1" value="0" aria-label="秒" />秒
+      <button id="startDur" class="primary">Start（この時間で塗り切り）</button>
+    </div>
+
+    <div class="row group">
+      <span class="small">② 終了時刻：</span>
+      <input id="th" type="number" min="0" max="23" step="1" value="" placeholder="時" style="width:5.5em" />時
+      <input id="tm" type="number" min="0" max="59" step="1" value="" placeholder="分" style="width:5.5em" />分
+      <button id="startClock" class="ghost">Start（この時刻に塗り切る）</button>
+      <span class="small note">※ 過ぎていれば翌日扱いで記録</span>
+    </div>
+
+    <div class="row group">
+      <label class="small">グラデ：</label>
+      <input id="c1" type="color" value="#4da3ff" title="開始色(デフォ=青)" />
+      <input id="c2" type="color" value="#ffd43b" title="終了色(デフォ=黄)" />
+      <label class="small">角度(°)：</label>
+      <input id="angle" type="number" min="0" max="360" step="1" value="90" style="width:6em" />
+    </div>
+
+    <div class="row group">
+      <label class="small">横(px)：</label>
+      <input id="wpx" type="number" min="1" step="1" value="0" title="内部横ピクセル" />
+      <label class="small">縦(px)：</label>
+      <input id="hpx" type="number" min="1" step="1" value="0" title="内部縦ピクセル" />
+      <button id="applyRes" class="ghost">解像度適用（適用後は固定）</button>
+      <span class="small note">※ 適用後は再読み込みまで変更不可</span>
+    </div>
+
+    <div class="row">
+      <button id="fs" class="ghost">全画面</button>
+      <button id="pause" class="ghost">Pause</button>
+      <button id="reset" class="ghost">Reset</button>
+      <span class="small">進捗：<span id="pct" class="ok">0%</span></span>
+      <span class="small">総ピクセル：<span id="total" class="ok">-</span></span>
+      <span class="small">モード：<span id="mode" class="ok">duration</span></span>
+      <span class="small">終了予定：<span id="endinfo" class="ok">-</span></span>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d', { alpha:true });
+  const $ = sel => document.querySelector(sel);
+
+  // ===== 状態 =====
+  let durationMs  = 50 * 60_000; 
+  let startTime   = null;
+  let pausedSum   = 0;
+  let pauseAt     = null;
+  let rafId       = null;
+  let gradC1 = '#4da3ff';
+  let gradC2 = '#ffd43b';
+  let gradAngleDeg = 90;
+  let mode = 'duration';
+  let lastClock = null;
+  let wasPaused = false; // persist paused
+
+  const KEY = 'timer_fill_pro_v34_state';
+  const KEY_CFG = 'timer_fill_pro_v34_cfg';
+
+  const clamp01 = x => x < 0 ? 0 : x > 1 ? 1 : x;
+  const now = () => Date.now();
+  function fmtRemain(tms) {
+    const s = Math.max(0, Math.ceil(tms / 1000));
+    const m = Math.floor(s / 60);
+    const h = Math.floor(m / 60);
+    const mm = m % 60, ss = String(s % 60).padStart(2, '0');
+    return h ? `${h}:${String(mm).padStart(2,'0')}:${ss}` : `${mm}:${ss}`;
+  }
+  function withComma(n){ return n.toLocaleString('en-US'); }
+  function progressNow() {
+    if (startTime == null) return 0;
+    const extra = pauseAt ? (now() - pauseAt) : 0;
+    return clamp01((now() - startTime - (pausedSum + extra)) / durationMs);
+  }
+
+  function makeLinearGradient(ctx, angleDeg){
+    const rad = (angleDeg % 360) * Math.PI / 180;
+    const ux = Math.cos(rad), uy = Math.sin(rad);
+    const cx = cv.width / 2, cy = cv.height / 2;
+    const L = Math.hypot(cv.width, cv.height) / 2;
+    const x0 = cx - ux * L, y0 = cy - uy * L;
+    const x1 = cx + ux * L, y1 = cy + uy * L;
+    const g = ctx.createLinearGradient(x0, y0, x1, y1);
+    g.addColorStop(0, gradC1);
+    g.addColorStop(1, gradC2);
+    return g;
+  }
+
+  // ===== 解像度 =====
+  function initResolutionSmart(){
+    const dpr = Math.max(1, Math.min(4, window.devicePixelRatio || 1));
+    const sw = screen.width, sh = screen.height;
+    const iw = window.innerWidth, ih = window.innerHeight;
+    const arScreen = sw / sh;
+    const arView   = iw / ih;
+    const diff = Math.abs(arScreen - arView);
+
+    // 2% 以上ずれてたら viewport ベースにして歪み回避
+    let w, h;
+    if (diff > 0.02) {
+      w = Math.round(iw * dpr);
+      h = Math.round(ih * dpr);
+    } else {
+      w = Math.round(sw * dpr);
+      h = Math.round(sh * dpr);
+    }
+    cv.width  = Math.max(1, w);
+    cv.height = Math.max(1, h);
+    $('#wpx').value = cv.width;
+    $('#hpx').value = cv.height;
+  }
+
+  // ===== 描画（スキャンライン） =====
+  function drawScanlineByProgress(p) {
+    ctx.clearRect(0,0,cv.width,cv.height);
+    const W = cv.width|0, H=cv.height|0;
+    const total=W*H;
+    $('#total').textContent = withComma(total);
+    const filled = Math.floor(total*p);
+    const grad = makeLinearGradient(ctx, gradAngleDeg);
+    ctx.fillStyle = grad;
+    const fullRows = Math.floor(filled/W);
+    const rem = filled - fullRows*W;
+    if(fullRows>0)ctx.fillRect(0,0,W,fullRows);
+    if(rem>0 && fullRows<H)ctx.fillRect(0,fullRows,rem,1);
+
+    const remain=durationMs*(1-progressNow());
+    const pctInt = Math.floor(p*100);
+    ctx.fillStyle='#fff'; ctx.textAlign='right'; ctx.textBaseline='top';
+    const baseFont=Math.round(Math.min(cv.width,cv.height)*0.05);
+    ctx.font=`${baseFont}px system-ui`;
+    const x=cv.width-12,y=10;
+    ctx.fillText(fmtRemain(remain),x,y);
+    ctx.font=`${Math.max(10,Math.round(baseFont*0.70))}px system-ui`;
+    ctx.fillText(`${pctInt}%`,x,y+baseFont*1.00);
+
+    const pctFine = Math.floor(p*10000)/100;
+    $('#pct').textContent=`${pctFine.toFixed(2)}%`;
+  }
+
+  function draw(){const p=progressNow();drawScanlineByProgress(p);if(p<1)rafId=requestAnimationFrame(draw);else rafId=null;}
+  function kick(){if(rafId)cancelAnimationFrame(rafId);draw();}
+
+  function save(){
+    const payload={durationMs,startTime,pausedSum,pauseAt:null,mode,lastClock,wasPaused:!!pauseAt};
+    localStorage.setItem(KEY,JSON.stringify(payload));
+    const cfg={gradC1,gradC2,gradAngleDeg,fixedW:cv.width,fixedH:cv.height};
+    localStorage.setItem(KEY_CFG,JSON.stringify(cfg));
+  }
+
+  function restore(){
+    const raw=localStorage.getItem(KEY);
+    if(raw){try{const s=JSON.parse(raw);
+      durationMs=s.durationMs??durationMs;
+      startTime=s.startTime??null;
+      pausedSum=s.pausedSum??0;
+      pauseAt=null;
+      mode=s.mode??mode;
+      lastClock=s.lastClock??lastClock;
+      wasPaused=!!s.wasPaused;
+    }catch{}}
+    const raw2=localStorage.getItem(KEY_CFG);
+    if(raw2){try{const c=JSON.parse(raw2);
+      gradC1=c.gradC1??gradC1;gradC2=c.gradC2??gradC2;gradAngleDeg=c.gradAngleDeg??gradAngleDeg;
+      if(c.fixedW&&c.fixedH){
+        cv.width=c.fixedW;cv.height=c.fixedH;
+        $('#wpx').value=c.fixedW;$('#hpx').value=c.fixedH;
+        $('#wpx').disabled=true;$('#hpx').disabled=true;$('#applyRes').disabled=true;
+      }
+    }catch{}}
+    $('#c1').value=gradC1;$('#c2').value=gradC2;$('#angle').value=gradAngleDeg;$('#mode').textContent=mode;
+
+    if (wasPaused && startTime) pauseAt = now();
+  }
+
+  const API={startDuration(h,m,s){const secs=Math.max(0.1,(+h||0)*3600+(+m||0)*60+(+s||0));durationMs=secs*1000;
+    startTime=now();pausedSum=0;pauseAt=null;wasPaused=false;mode='duration';lastClock=null;save();updateMode();updateEnd(startTime+durationMs);kick();updatePause();},
+    startClock(hh,mm){const d=new Date();d.setSeconds(0,0);d.setHours(+hh||0,+mm||0,0,0);if(d.getTime()<=now())d.setDate(d.getDate()+1);
+    startTime=now();pausedSum=0;pauseAt=null;wasPaused=false;durationMs=Math.max(100,d.getTime()-startTime);mode='clock';lastClock={hh:+hh||0,mm:+mm||0,targetEpochMs:d.getTime()};
+    save();updateMode();updateEnd(d.getTime());kick();updatePause();},
+    togglePause(){if(!startTime)return;pauseAt?API.resume():API.pause();},
+    pause(){if(!startTime||pauseAt)return;pauseAt=now();wasPaused=true;save();updatePause();},
+    resume(){if(!startTime||!pauseAt)return;pausedSum+=now()-pauseAt;pauseAt=null;wasPaused=false;save();kick();updatePause();},
+    reset(){startTime=null;pausedSum=0;pauseAt=null;wasPaused=false;save();kick();updatePause();}
+  };
+
+  function updatePause(){const b=$('#pause');if(!startTime){b.textContent='Pause';b.disabled=true;return;}b.disabled=false;b.textContent=pauseAt?'Resume':'Pause';}
+  function updateMode(){$('#mode').textContent=mode;}
+  function updateEnd(epoch){if(!epoch){$('#endinfo').textContent='-';return;}const d=new Date(epoch);$('#endinfo').textContent=`${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;}
+
+  $('#startDur').onclick=()=>API.startDuration($('#dh').value,$('#dm').value,$('#ds').value);
+  $('#startClock').onclick=()=>{const hh=$('#th').value,mm=$('#tm').value;if(hh===''||mm==='')return;API.startClock(hh,mm);};
+  $('#pause').onclick=()=>API.togglePause();
+  $('#reset').onclick=()=>API.reset();
+
+  $('#c1').oninput=e=>{gradC1=e.target.value;save();kick();};
+  $('#c2').oninput=e=>{gradC2=e.target.value;save();kick();};
+  $('#angle').onchange=e=>{gradAngleDeg=parseFloat(e.target.value)||0;save();kick();};
+
+  $('#applyRes').onclick=()=>{
+    const w=Math.max(1,+$('#wpx').value||cv.width),h=Math.max(1,+$('#hpx').value||cv.height);
+    cv.width=w;cv.height=h;
+    $('#wpx').disabled=true;$('#hpx').disabled=true;$('#applyRes').disabled=true;
+    save();kick();
+  };
+
+  $('#fs').onclick=async()=>{try{if(!document.fullscreenElement)await document.documentElement.requestFullscreen();else await document.exitFullscreen();}catch(e){}}
+  document.onfullscreenchange=()=>kick();
+  document.onvisibilitychange=()=>{if(document.visibilityState==='visible')kick();};
+  window.onpageshow=kick;window.onbeforeunload=save;
+
+  (function init(){
+    initResolutionSmart();
+    restore(); 
+    $('#dh').value=0;$('#dm').value=50;$('#ds').value=0;
+    updatePause();kick();
+  })();
+})();
+</script>
+</body>
+</html>
