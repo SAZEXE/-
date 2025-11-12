@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>timer_fill_pro_full_grad — v2 (time-based, iPad-friendly)</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --text:#e9eef4; --muted:#94a3b8;
+    --accent1:#4da3ff; --accent2:#8a7dff; --ring:#2b3140; --ok:#22c55e;
+  }
+  html,body{height:100%;}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font:16px/1.5 -apple-system,system-ui,Segoe UI,Roboto,Helvetica,Arial,"Hiragino Sans","Noto Sans JP",sans-serif;
+    display:grid; grid-template-rows:1fr auto; gap:10px;
+  }
+  header{
+    display:flex; align-items:center; justify-content:center; gap:10px;
+    padding:12px 14px; background:var(--panel); box-shadow:0 1px 0 rgba(255,255,255,.04) inset;
+  }
+  header h1{font-size:16px; margin:0; font-weight:600; opacity:.9;}
+  main{display:grid; place-items:center; padding:10px;}
+  canvas{width:min(84vmin,560px); height:min(84vmin,560px); touch-action:none;}
+  .hud{
+    position:fixed; left:50%; bottom:14px; transform:translateX(-50%);
+    background:var(--panel); border:1px solid #222834; border-radius:12px;
+    padding:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+    box-shadow:0 8px 24px rgba(0,0,0,.35);
+  }
+  .hud input[type="number"]{width:6.5em;}
+  .hud input,.hud button,.hud select{
+    font:inherit; color:var(--text); background:#1d2230; border:1px solid #2b3140; border-radius:10px;
+    padding:8px 10px; outline:none;
+  }
+  .hud button{cursor:pointer;}
+  .hud button.primary{background:linear-gradient(135deg,var(--accent1),var(--accent2)); border:none; font-weight:700;}
+  .hud button.ghost{background:transparent; border-color:#2b3140; color:var(--muted);}
+  .pill{padding:.2em .55em; border-radius:999px; background:#1f2937; color:var(--muted); font-size:.85em;}
+  .row{display:flex; gap:8px; align-items:center;}
+  .grow{flex:1 1 auto;}
+  .small{font-size:.85em; color:var(--muted);}
+  .ok{color:var(--ok); font-weight:700;}
+</style>
+</head>
+<body>
+  <header>
+    <h1>timer_fill_pro_full_grad — v2</h1>
+    <span class="pill">サイレント / スリープ復帰対応</span>
+  </header>
+
+  <main>
+    <canvas id="cv" width="700" height="700" aria-label="タイマー表示"></canvas>
+  </main>
+
+  <div class="hud" role="group" aria-label="タイマー操作">
+    <div class="row">
+      <label class="small">分：</label>
+      <input id="mins" type="number" min="0" step="0.5" value="25" inputmode="decimal" />
+      <button id="start" class="primary">Start</button>
+      <button id="pause" class="ghost">Pause</button>
+      <button id="reset" class="ghost">Reset</button>
+    </div>
+    <div class="row">
+      <label class="small">形状：</label>
+      <select id="shape">
+        <option value="ring">リング</option>
+        <option value="bar">バー</option>
+      </select>
+      <label class="small">終了時刻：</label>
+      <input id="endtime" type="time" class="small" />
+      <button id="startUntil" class="ghost">その時刻まで</button>
+      <span class="small">進捗：<span id="pct" class="ok">0%</span></span>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d', { alpha:true });
+  const $ = sel => document.querySelector(sel);
+
+  // ===== 状態 =====
+  let durationMs  = 25 * 60_000;
+  let startTime   = null;    // ms since epoch
+  let pausedSum   = 0;       // 合計一時停止時間
+  let pauseAt     = null;    // 一時停止中なら開始時刻
+  let rafId       = null;
+  let shape       = localStorage.getItem('timer_v2_shape') || 'ring';
+
+  const KEY = 'timer_fill_state_v2';
+
+  // ===== ツール =====
+  const clamp01 = x => x < 0 ? 0 : x > 1 ? 1 : x;
+  const now = () => Date.now();
+
+  function progressNow() {
+    if (startTime == null) return 0;
+    const extra = pauseAt ? (now() - pauseAt) : 0;
+    return clamp01((now() - startTime - (pausedSum + extra)) / durationMs);
+  }
+
+  function fmtRemain(tms) {
+    const s = Math.max(0, Math.ceil(tms / 1000));
+    const m = Math.floor(s / 60), ss = String(s % 60).padStart(2, '0');
+    return `${m}:${ss}`;
+  }
+
+  // ===== 描画 =====
+  function drawRing(p) {
+    const cx = cv.width * 0.5, cy = cv.height * 0.5, r = Math.min(cv.width, cv.height) * 0.36;
+    ctx.lineWidth = Math.round(Math.min(cv.width, cv.height) * 0.07);
+
+    // 背景リング
+    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--ring') || '#2b3140';
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, -Math.PI/2, 3*Math.PI/2);
+    ctx.stroke();
+
+    // 進捗リング（グラデ）
+    const g = ctx.createLinearGradient(0, 0, cv.width, cv.height);
+    g.addColorStop(0, getCSS('--accent1','#4da3ff'));
+    g.addColorStop(1, getCSS('--accent2','#8a7dff'));
+    ctx.strokeStyle = g;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, -Math.PI/2, -Math.PI/2 + p * Math.PI * 2);
+    ctx.stroke();
+
+    // 中央テキスト
+    ctx.fillStyle = getCSS('--text','#e9eef4');
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `${Math.round(Math.min(cv.width, cv.height) * 0.11)}px system-ui, -apple-system`;
+    const remain = durationMs * (1 - p);
+    ctx.fillText(fmtRemain(remain), cx, cy);
+  }
+
+  function drawBar(p) {
+    const w = cv.width * 0.82, h = Math.min(64, cv.height * 0.10);
+    const x = (cv.width - w) / 2, y = (cv.height - h) / 2;
+
+    // 背景
+    roundRect(x, y, w, h, Math.min(16, h/2));
+    ctx.fillStyle = '#2b3140';
+    ctx.fill();
+
+    // 進捗
+    const g = ctx.createLinearGradient(x, y, x + w, y + h);
+    g.addColorStop(0, getCSS('--accent1','#4da3ff'));
+    g.addColorStop(1, getCSS('--accent2','#8a7dff'));
+    roundRect(x, y, Math.max(h, w * p), h, Math.min(16, h/2));
+    ctx.fillStyle = g;
+    ctx.fill();
+
+    // 文字
+    ctx.fillStyle = getCSS('--text','#e9eef4');
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.font = `${Math.round(h * 0.6)}px system-ui, -apple-system`;
+    const remain = durationMs * (1 - p);
+    ctx.fillText(fmtRemain(remain), cv.width/2, y - 12);
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y,     x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x,     y + h, r);
+    ctx.arcTo(x,     y + h, x,     y,     r);
+    ctx.arcTo(x,     y,     x + w, y,     r);
+    ctx.closePath();
+  }
+
+  function getCSS(name, fallback){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback; }
+
+  function draw() {
+    const p = progressNow();
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    if (shape === 'bar') drawBar(p);
+    else drawRing(p);
+
+    $('#pct').textContent = `${Math.round(p*100)}%`;
+
+    if (p < 1) rafId = requestAnimationFrame(draw);
+    else rafId = null;
+  }
+
+  function kick() {
+    if (rafId) cancelAnimationFrame(rafId);
+    draw();
+  }
+
+  // ===== 状態保存 =====
+  function save() {
+    const payload = { durationMs, startTime, pausedSum, pauseAt:null, shape };
+    localStorage.setItem(KEY, JSON.stringify(payload));
+    localStorage.setItem('timer_v2_shape', shape);
+  }
+
+  function restore() {
+    const raw = localStorage.getItem(KEY);
+    if (!raw) return;
+    try {
+      const s = JSON.parse(raw);
+      durationMs = s.durationMs ?? durationMs;
+      startTime  = s.startTime  ?? null;
+      pausedSum  = s.pausedSum  ?? 0;
+      pauseAt    = null; // pause復帰時は押し直しで再開
+      shape      = s.shape ?? shape;
+      $('#shape').value = shape;
+    } catch {}
+  }
+
+  // ===== API =====
+  const API = {
+    start(ms){
+      durationMs = (ms ?? durationMs) | 0;
+      startTime = now(); pausedSum = 0; pauseAt = null;
+      save(); kick();
+    },
+    pause(){
+      if (!startTime || pauseAt) return;
+      pauseAt = now(); save();
+    },
+    resume(){
+      if (!startTime || !pauseAt) return;
+      pausedSum += now() - pauseAt;
+      pauseAt = null; save(); kick();
+    },
+    togglePause(){
+      if (!startTime) return;
+      if (pauseAt) API.resume(); else API.pause();
+      updatePauseBtn();
+    },
+    reset(){
+      startTime = null; pausedSum = 0; pauseAt = null;
+      save(); kick(); updatePauseBtn();
+    },
+    startUntil(endEpochMs){
+      const n = now();
+      startTime = n; durationMs = Math.max(0, endEpochMs - n);
+      pausedSum = 0; pauseAt = null;
+      save(); kick(); updatePauseBtn();
+    },
+    progress: () => progressNow(),
+    setShape(v){ shape = (v === 'bar') ? 'bar' : 'ring'; save(); kick(); }
+  };
+  window.timerFill = API;
+
+  // ===== イベント =====
+  function updatePauseBtn(){
+    const b = $('#pause');
+    if (!startTime){ b.textContent = 'Pause'; b.disabled = true; return; }
+    b.disabled = false;
+    b.textContent = pauseAt ? 'Resume' : 'Pause';
+  }
+
+  $('#start').addEventListener('click', () => {
+    const mins = parseFloat($('#mins').value || '25');
+    API.start(Math.max(0.1, mins) * 60_000);
+    updatePauseBtn();
+  });
+  $('#pause').addEventListener('click', () => API.togglePause());
+  $('#reset').addEventListener('click', () => API.reset());
+
+  $('#shape').addEventListener('change', e => API.setShape(e.target.value));
+
+  $('#startUntil').addEventListener('click', () => {
+    const t = $('#endtime').value; // "HH:MM"
+    if (!t) return;
+    const [hh, mm] = t.split(':').map(x => parseInt(x, 10));
+    const d = new Date();
+    d.setHours(hh, mm, 0, 0);
+    // もし指定時刻が既に過ぎていたら、明日扱いにする
+    if (d.getTime() <= now()) d.setDate(d.getDate() + 1);
+    API.startUntil(d.getTime());
+  });
+
+  addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') kick(); });
+  addEventListener('pageshow', kick);
+  addEventListener('beforeunload', save);
+  addEventListener('resize', () => {
+    // 画素密度対応: 論理サイズ維持しつつ内部ピクセル更新
+    const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    const w = Math.min(window.innerWidth * 0.9, 900);
+    const h = Math.min(window.innerHeight * 0.9, 900);
+    cv.width = Math.round(w * dpr);
+    cv.height = Math.round(h * dpr);
+    cv.style.width = Math.round(w) + 'px';
+    cv.style.height = Math.round(h) + 'px';
+    kick();
+  });
+
+  // 初期化
+  (function init(){
+    restore();
+    $('#shape').value = shape;
+    updatePauseBtn();
+    // 初回 resize でキャンバスを最適化
+    window.dispatchEvent(new Event('resize'));
+  })();
+})();
+</script>
+</body>
+</html>
