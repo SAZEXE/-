@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>timer_fill_pro_full_grad — v2.3 (gradient settings + custom resolution)</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --text:#e9eef4; --muted:#94a3b8;
+    --accent1:#4da3ff; --accent2:#8a7dff; --ring:#2b3140; --grid:#0f1220;
+  }
+  html,body{height:100%;}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font:16px/1.5 -apple-system,system-ui,Segoe UI,Roboto,Helvetica,Arial,"Hiragino Sans","Noto Sans JP",sans-serif;
+    display:grid; grid-template-rows:1fr auto; gap:10px;
+  }
+  header{
+    display:flex; align-items:center; justify-content:center; gap:10px;
+    padding:12px 14px; background:var(--panel); box-shadow:0 1px 0 rgba(255,255,255,.04) inset;
+  }
+  header h1{font-size:16px; margin:0; font-weight:600; opacity:.9;}
+  main{display:grid; place-items:center; padding:0; margin:0;}
+  canvas{width:100vw; height:100vh; touch-action:none; background:var(--grid); display:block;}
+  .hud{
+    position:fixed; left:50%; bottom:14px; transform:translateX(-50%);
+    background:var(--panel); border:1px solid #222834; border-radius:12px;
+    padding:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+    box-shadow:0 8px 24px rgba(0,0,0,.35);
+  }
+  .hud input[type="number"]{width:8.5em;}
+  .hud input,.hud button,.hud select,.hud label{
+    font:inherit; color:var(--text);
+  }
+  .hud input[type="number"], .hud input[type="color"], .hud select, .hud button{
+    background:#1d2230; border:1px solid #2b3140; border-radius:10px;
+    padding:8px 10px; outline:none;
+  }
+  .hud button{cursor:pointer;}
+  .hud button.primary{background:linear-gradient(135deg,var(--accent1),var(--accent2)); border:none; font-weight:700;}
+  .hud button.ghost{background:transparent; border-color:#2b3140; color:var(--muted);}
+  .pill{padding:.2em .55em; border-radius:999px; background:#1f2937; color:var(--muted); font-size:.85em;}
+  .row{display:flex; gap:8px; align-items:center; flex-wrap:wrap;}
+  .small{font-size:.85em; color:var(--muted);}
+  .ok{font-weight:700;}
+  label.small{user-select:none;}
+  .hide-in-fs{}
+  :fullscreen .hide-in-fs{ display:none; }
+  .group{padding:6px 8px; border:1px solid #2b3140; border-radius:10px; background:#151a26;}
+</style>
+</head>
+<body>
+  <header class="hide-in-fs">
+    <h1>timer_fill_pro_full_grad — v2.3</h1>
+    <span class="pill">スキャンライン / ピクセル数指定 / 全画面 / グラデ設定 / 解像度指定</span>
+  </header>
+
+  <main>
+    <canvas id="cv" width="700" height="700" aria-label="タイマー表示（スキャンライン）"></canvas>
+  </main>
+
+  <div class="hud" role="group" aria-label="操作">
+    <div class="row group">
+      <label class="small">塗るピクセル数：</label>
+      <input id="pixels" type="number" min="1" step="1" value="1000000" inputmode="numeric" />
+      <label class="small">時間(秒)：</label>
+      <input id="seconds" type="number" min="0.1" step="0.1" value="60" inputmode="decimal" />
+      <button id="start" class="primary">Start</button>
+      <button id="pause" class="ghost">Pause</button>
+      <button id="reset" class="ghost">Reset</button>
+    </div>
+
+    <div class="row group">
+      <label class="small">グラデ：</label>
+      <input id="c1" type="color" value="#4da3ff" title="開始色" />
+      <input id="c2" type="color" value="#8a7dff" title="終了色" />
+      <label class="small">角度(°)：</label>
+      <input id="angle" type="number" min="0" max="360" step="1" value="45" style="width:6em" />
+    </div>
+
+    <div class="row group">
+      <label class="small">横(px)：</label>
+      <input id="wpx" type="number" min="1" step="1" value="0" title="内部横ピクセル（0=自動）" />
+      <label class="small">縦(px)：</label>
+      <input id="hpx" type="number" min="1" step="1" value="0" title="内部縦ピクセル（0=自動）" />
+      <label class="small">固定：</label>
+      <input id="lockRes" type="checkbox" />
+      <button id="applyRes" class="ghost">解像度適用</button>
+    </div>
+
+    <div class="row">
+      <button id="fs" class="ghost">全画面</button>
+      <span class="small">進捗：<span id="pct" class="ok">0%</span></span>
+      <span class="small">画面総ピクセル：<span id="total" class="ok">-</span></span>
+      <span class="small">目標：<span id="goal" class="ok">-</span></span>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d', { alpha:true });
+  const $ = sel => document.querySelector(sel);
+
+  // ===== 状態 =====
+  let durationMs  = 60_000;      // 指定秒でゴールまで
+  let startTime   = null;        // ms since epoch
+  let pausedSum   = 0;           // 合計一時停止時間
+  let pauseAt     = null;        // 一時停止中なら開始時刻
+  let rafId       = null;
+  let goalPixels  = 1_000_000;   // ゴールとなる塗りピクセル数（デバイスピクセル）
+
+  // Gradient settings
+  let gradC1 = '#4da3ff';
+  let gradC2 = '#8a7dff';
+  let gradAngleDeg = 45;
+
+  // Resolution settings
+  let lockRes = false;  // true = use fixed internal resolution
+  let fixedW = 0;       // internal width in pixels (0 = auto)
+  let fixedH = 0;
+
+  const KEY = 'timer_fill_state_v23_pixels';
+  const KEY_CFG = 'timer_fill_cfg_v23';
+
+  // ===== ユーティリティ =====
+  const clamp01 = x => x < 0 ? 0 : x > 1 ? 1 : x;
+  const now = () => Date.now();
+  function fmtRemain(tms) {
+    const s = Math.max(0, Math.ceil(tms / 1000));
+    const m = Math.floor(s / 60), ss = String(s % 60).padStart(2, '0');
+    return `${m}:${ss}`;
+  }
+  function withComma(n){ return n.toLocaleString('en-US'); }
+
+  function progressNow() {
+    if (startTime == null) return 0;
+    const extra = pauseAt ? (now() - pauseAt) : 0;
+    return clamp01((now() - startTime - (pausedSum + extra)) / durationMs);
+  }
+
+  // ===== グラデ計算 =====
+  function makeLinearGradient(ctx, angleDeg){
+    // 中心から角度方向に対してキャンバス外まで伸ばす
+    const rad = (angleDeg % 360) * Math.PI / 180;
+    const ux = Math.cos(rad), uy = Math.sin(rad);
+    const cx = cv.width / 2, cy = cv.height / 2;
+    const L = Math.hypot(cv.width, cv.height) / 2; // 半対角
+    const x0 = cx - ux * L, y0 = cy - uy * L;
+    const x1 = cx + ux * L, y1 = cy + uy * L;
+    const g = ctx.createLinearGradient(x0, y0, x1, y1);
+    g.addColorStop(0, gradC1);
+    g.addColorStop(1, gradC2);
+    return g;
+  }
+
+  // ===== 描画（スキャンライン固定） =====
+  function drawScanlineByPixels(filledPixels) {
+    // クリア
+    ctx.clearRect(0,0,cv.width,cv.height);
+
+    const W = cv.width | 0;
+    const H = cv.height | 0;
+    const total = W * H;
+    $('#total').textContent = withComma(total);
+
+    const filled = Math.min(Math.max(0, filledPixels|0), total);
+
+    // グラデ
+    const grad = makeLinearGradient(ctx, gradAngleDeg);
+    ctx.fillStyle = grad;
+
+    const fullRows = Math.floor(filled / W);
+    const rem = filled - fullRows * W;
+
+    if (fullRows > 0) ctx.fillRect(0, 0, W, fullRows);
+    if (rem > 0 && fullRows < H) ctx.fillRect(0, fullRows, rem, 1);
+
+    // 目標線（視覚目安）
+    if (goalPixels <= total) {
+      const frac = goalPixels / total;
+      const gy = Math.floor(frac * H);
+      ctx.fillStyle = 'rgba(255,255,255,0.08)';
+      ctx.fillRect(0, gy, W, 2);
+    }
+
+    // HUD情報
+    const p = total ? filled / Math.min(goalPixels, total) : 0;
+    $('#pct').textContent = `${Math.round(clamp01(p)*100)}%`;
+    $('#goal').textContent = withComma(Math.min(goalPixels, total));
+
+    // 残り時間（右上）
+    const remain = durationMs * (1 - progressNow());
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'top';
+    ctx.font = `${Math.round(Math.min(cv.width, cv.height)*0.06)}px system-ui, -apple-system`;
+    ctx.fillText(fmtRemain(remain), cv.width - 12, 10);
+  }
+
+  function draw() {
+    const prog = progressNow();
+    const filled = Math.floor(goalPixels * prog);
+    drawScanlineByPixels(filled);
+    if (prog < 1) rafId = requestAnimationFrame(draw); else rafId = null;
+  }
+  function kick(){ if (rafId) cancelAnimationFrame(rafId); draw(); }
+
+  // ===== 状態保存 =====
+  function save() {
+    const payload = { durationMs, startTime, pausedSum, pauseAt:null, goalPixels };
+    localStorage.setItem(KEY, JSON.stringify(payload));
+    const cfg = {gradC1,gradC2,gradAngleDeg,lockRes,fixedW,fixedH};
+    localStorage.setItem(KEY_CFG, JSON.stringify(cfg));
+  }
+  function restore() {
+    const raw = localStorage.getItem(KEY);
+    if (raw) {
+      try {
+        const s = JSON.parse(raw);
+        durationMs = s.durationMs ?? durationMs;
+        startTime  = s.startTime  ?? null;
+        pausedSum  = s.pausedSum  ?? 0;
+        pauseAt    = null;
+        goalPixels = s.goalPixels ?? goalPixels;
+        $('#pixels').value = goalPixels;
+        $('#seconds').value = Math.max(0.1, durationMs/1000);
+      } catch {}
+    }
+    const raw2 = localStorage.getItem(KEY_CFG);
+    if (raw2) {
+      try {
+        const c = JSON.parse(raw2);
+        gradC1 = c.gradC1 ?? gradC1;
+        gradC2 = c.gradC2 ?? gradC2;
+        gradAngleDeg = c.gradAngleDeg ?? gradAngleDeg;
+        lockRes = !!c.lockRes;
+        fixedW = c.fixedW ?? fixedW;
+        fixedH = c.fixedH ?? fixedH;
+      } catch {}
+    }
+    // 反映
+    $('#c1').value = gradC1;
+    $('#c2').value = gradC2;
+    $('#angle').value = gradAngleDeg;
+    $('#lockRes').checked = lockRes;
+    $('#wpx').value = fixedW || 0;
+    $('#hpx').value = fixedH || 0;
+  }
+
+  // ===== API =====
+  const API = {
+    start(gPixels, seconds){
+      const total = cv.width * cv.height;
+      goalPixels = Math.max(1, Math.min(gPixels ?? goalPixels, total)); // 画面より大きい場合は総ピクセルに丸め
+      durationMs = Math.max(100, (seconds ?? durationMs/1000) * 1000);
+      startTime = now(); pausedSum = 0; pauseAt = null;
+      save(); kick(); updatePauseBtn();
+    },
+    pause(){
+      if (!startTime || pauseAt) return;
+      pauseAt = now(); save(); updatePauseBtn();
+    },
+    resume(){
+      if (!startTime || !pauseAt) return;
+      pausedSum += now() - pauseAt; pauseAt = null; save(); kick(); updatePauseBtn();
+    },
+    togglePause(){
+      if (!startTime) return;
+      if (pauseAt) API.resume(); else API.pause();
+    },
+    reset(){
+      startTime = null; pausedSum = 0; pauseAt = null;
+      save(); kick(); updatePauseBtn();
+    },
+    progress: () => progressNow()
+  };
+  window.timerFill = API;
+
+  // ===== イベント =====
+  function updatePauseBtn(){
+    const b = $('#pause');
+    if (!startTime){ b.textContent = 'Pause'; b.disabled = true; return; }
+    b.disabled = false;
+    b.textContent = pauseAt ? 'Resume' : 'Pause';
+  }
+
+  // Controls
+  $('#start').addEventListener('click', () => {
+    const px = parseInt($('#pixels').value || '1000000', 10);
+    const sec = parseFloat($('#seconds').value || '60');
+    API.start(px, sec);
+  });
+  $('#pause').addEventListener('click', () => API.togglePause());
+  $('#reset').addEventListener('click', () => API.reset());
+
+  // Gradient inputs
+  $('#c1').addEventListener('input', e => { gradC1 = e.target.value; save(); kick(); });
+  $('#c2').addEventListener('input', e => { gradC2 = e.target.value; save(); kick(); });
+  $('#angle').addEventListener('change', e => { gradAngleDeg = parseFloat(e.target.value)||0; save(); kick(); });
+
+  // Resolution controls
+  $('#applyRes').addEventListener('click', () => {
+    lockRes = $('#lockRes').checked;
+    fixedW = Math.max(1, parseInt($('#wpx').value||'0',10) || 0);
+    fixedH = Math.max(1, parseInt($('#hpx').value||'0',10) || 0);
+    if (!lockRes) { fixedW = 0; fixedH = 0; }
+    save();
+    onResize(true);
+  });
+
+  $('#fs').addEventListener('click', async () => {
+    try{
+      if (!document.fullscreenElement) {
+        await document.documentElement.requestFullscreen();
+      } else {
+        await document.exitFullscreen();
+      }
+    }catch(e){ console.warn(e); }
+  });
+  document.addEventListener('fullscreenchange', () => {
+    onResize(false);
+  });
+
+  // リサイズ: 
+  // - 自動: DPRに合わせて内部ピクセル＝windowサイズ×DPR
+  // - 固定: 指定の横/縦ピクセルを内部サイズに、CSSで100vw/100vhに拡大表示
+  function onResize(isManual=false){
+    if (lockRes && fixedW>0 && fixedH>0) {
+      cv.width = fixedW;
+      cv.height = fixedH;
+    } else {
+      const dpr = Math.max(1, Math.min(4, window.devicePixelRatio || 1));
+      cv.width = Math.max(1, Math.round(window.innerWidth * dpr));
+      cv.height = Math.max(1, Math.round(window.innerHeight * dpr));
+    }
+    // CSSは100vw/100vh固定
+    // 解像度変更で目標ピクセルが画面総ピクセルを超える場合は丸める
+    const total = cv.width * cv.height;
+    if (goalPixels > total) goalPixels = total;
+    kick();
+  }
+  addEventListener('resize', () => onResize(false));
+
+  addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') kick(); });
+  addEventListener('pageshow', kick);
+  addEventListener('beforeunload', save);
+
+  // 初期化
+  (function init(){
+    restore();
+    onResize(false);
+    updatePauseBtn();
+  })();
+})();
+</script>
+</body>
+</html>
