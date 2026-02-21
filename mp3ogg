@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>MP3 → OGG 変換</title>
+</head>
+<body>
+
+<h2>MP3 → OGG 変換ツール</h2>
+<input type="file" id="fileInput" accept=".mp3">
+<button id="convertBtn">変換する</button>
+<p id="status"></p>
+<a id="downloadLink" style="display:none;">ダウンロード</a>
+
+<script type="module">
+import { FFmpeg } from "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.6/dist/esm/index.js";
+import { fetchFile } from "https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js";
+
+const ffmpeg = new FFmpeg();
+const btn = document.getElementById("convertBtn");
+const status = document.getElementById("status");
+
+btn.addEventListener("click", async () => {
+    const file = document.getElementById("fileInput").files[0];
+    if (!file) {
+        alert("MP3を選択してください");
+        return;
+    }
+
+    status.textContent = "読み込み中...";
+
+    await ffmpeg.load();
+
+    ffmpeg.on("log", ({ message }) => {
+        console.log(message);
+    });
+
+    await ffmpeg.writeFile("input.mp3", await fetchFile(file));
+
+    status.textContent = "変換中...";
+
+    await ffmpeg.exec(["-i", "input.mp3", "output.ogg"]);
+
+    const data = await ffmpeg.readFile("output.ogg");
+
+    const url = URL.createObjectURL(
+        new Blob([data.buffer], { type: "audio/ogg" })
+    );
+
+    const link = document.getElementById("downloadLink");
+    link.href = url;
+    link.download = "converted.ogg";
+    link.style.display = "inline";
+    link.textContent = "OGGをダウンロード";
+
+    status.textContent = "完了！";
+});
+</script>
+
+</body>
+</html>
